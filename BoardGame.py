@@ -1,3 +1,7 @@
+#alright, ive tried damn near everything and i cant figure out how to get directional choice movement to work all the time. i have a huge conversation with both ChatGPT and Copilot trying to get this website to fully work but i cant do it!!!
+#i cant enter the zones. it runs, it works, but its not fully funcitonal as designed :( big sad
+#super super cool project though!! i loved every bit of it (outside of when AI was acting quite stupid haha)
+
 from flask import Flask, render_template_string, request, redirect, url_for, session
 import random
 app = Flask(__name__)
