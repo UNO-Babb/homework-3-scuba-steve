@@ -29,7 +29,7 @@ zone_labels = {}
 for zone, (x_col, y_col) in columns.items():
     for x, y in zip(sheet[x_col], sheet[y_col]):
         if pd.notna(x) and pd.notna(y):
-            coord = (int(y), int(x)) 
+            coord = (int(y), int(x))
             if coord in zone_labels and 'entry' not in zone:
                 continue
             zone_labels[coord] = zone
@@ -67,9 +67,8 @@ for zone, coords in zone_tiles.items():
     for coord in random.sample(coords, troll_count):
         event_map.setdefault(coord, []).append('Troll')
 
-zone_labels = {}  # now loaded only from Excel
 
-player_positions = {1: (17, 5), 2: (17, 5)}
+player_positions = {1: (5, 17), 2: (5, 17)}
 player_scores = {1: 0, 2: 0}
 player_stats = {1: {'loot': 0, 'traps': 0, 'gold_lost': 0}, 2: {'loot': 0, 'traps': 0, 'gold_lost': 0}}
 current_player = 1
@@ -124,14 +123,13 @@ GAME_TEMPLATE = """
       {% set cell = grid[row_index][col_index] %}
       {% if cell %}
         <div class="tile {{ cell[3] }}" style="top: {{ row_index * 62 }}px; left: {{ col_index * 62 }}px">
-          <div>{{ cell[0] }}</div>
           <div>
             {% for event in cell[1] %}
-              {% if event == 'Loot' %}💰{% elif event == 'Trap' %}☠️{% elif event == 'Troll' %}👹{% endif %}
-            {% endfor %}
+  {% if event == 'Loot' %}💰{% endif %}
+{% endfor %}
           </div>
           <div class="players">{{ cell[2]|safe }}</div>
-          <div>{{ cell[3].replace('-entry', '') }}</div>
+          {% if 'entry' in cell[3] %}<div>{{ cell[3].replace('-entry', '') }}</div>{% endif %}
         </div>
       {% endif %}
     {% endfor %}
@@ -181,7 +179,7 @@ def game():
         winner = session.get('player1_name', 'Player 1') if player_scores[1] >= 100 else session.get('player2_name', 'Player 2')
         return f"<h1>{winner} wins the game with 100+ gold!</h1><br><a href='/'>Play Again</a>"
 
-    grid = [[None for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
+    grid = build_grid()
     for r in range(GRID_ROWS):
         for c in range(GRID_COLS):
             coord = (r, c)
@@ -201,8 +199,9 @@ def game():
 @app.route('/roll', methods=['POST'])
 def roll():
     r, c = player_positions[current_player]
-    die1 = random.randint(1, 6)
-    die2 = random.randint(1, 6)
+    rng = random.SystemRandom()
+    die1 = rng.randint(1, 6)
+    die2 = rng.randint(1, 6)
     options = [die1, die2, die1 + die2]
     session['roll_options'] = options
     session['player_coord'] = (r, c)
@@ -218,54 +217,114 @@ def choose():
         move_map = {'N': (-1, 0), 'S': (1, 0), 'E': (0, 1), 'W': (0, -1)}
         valid_directions = []
         for d, (dr, dc) in move_map.items():
-            nr, nc = r + dr * choice, c + dc * choice
-            if (0 <= nr < GRID_ROWS and 0 <= nc < GRID_COLS and (nr, nc) in zone_labels):
+            valid = True
+            for step in range(1, choice + 1):
+                nr, nc = r + dr * step, c + dc * step
+                if not (0 <= nr < GRID_ROWS and 0 <= nc < GRID_COLS and (nr, nc) in zone_labels):
+                    valid = False
+                    break
+            if valid:
                 valid_directions.append(d)
         session['valid_directions'] = valid_directions
         return redirect(url_for('choose_direction'))
 
     options = session.get('roll_options', [1, 2, 3])
-    return render_template_string("""
-        <h1>Choose Your Move</h1>
-        <form method='POST'>
-            {% for option in options %}
-                <button name='choice' value='{{ option }}'>Move {{ option }}</button><br>
-            {% endfor %}
-        </form>
-    """, options=options)
+    grid = build_grid()
+    return render_template_string(
+        GAME_TEMPLATE + """
+<h1>Choose Your Move</h1>
+<form method='POST'>
+%s
+</form>
+""" % "".join(f"<button name='choice' value='{option}'>Move {option}</button><br>" for option in options),
+        grid=grid,
+        player_scores=player_scores,
+        player1=session.get('player1_name', 'Player 1'),
+        player2=session.get('player2_name', 'Player 2'),
+        current_player=current_player,
+        player_stats=player_stats,
+        game_log=game_log
+    )
 
 @app.route('/choose_direction', methods=['GET', 'POST'])
 def choose_direction():
     global current_player
     options = session.get('valid_directions', [])
+    if not options:
+        r, c = session.get('player_coord', (0, 0))
+        remaining_steps = session.get('chosen_distance', 0)
+        move_map = {'N': (-1, 0), 'S': (1, 0), 'E': (0, 1), 'W': (0, -1)}
+        for d, (ndr, ndc) in move_map.items():
+            for step in range(1, remaining_steps + 1):
+                nr, nc = r + ndr * step, c + ndc * step
+                if 0 <= nr < GRID_ROWS and 0 <= nc < GRID_COLS and (nr, nc) in zone_labels:
+                    options.append(d)
+                    break
+        if options:
+            session['valid_directions'] = options
+        else:
+            chosen_tile = (r, c)
+            session.pop('valid_directions', None)
+            session.pop('chosen_distance', None)
+            return process_movement(chosen_tile)
     if request.method == 'POST':
         move = request.form.get('move')
         choice = int(session['chosen_distance'])
         r, c = session['player_coord']
         move_map = {'N': (-1, 0), 'S': (1, 0), 'E': (0, 1), 'W': (0, -1)}
         dr, dc = move_map[move]
-        nr, nc = r + dr * choice, c + dc * choice
-        chosen_tile = (nr, nc)
+        path = []
+        remaining_steps = choice
+        while remaining_steps > 0:
+            next_r, next_c = r + dr, c + dc
+            if (0 <= next_r < GRID_ROWS and 0 <= next_c < GRID_COLS and (next_r, next_c) in zone_labels):
+                r, c = next_r, next_c
+                path.append((r, c))
+                remaining_steps -= 1
+                tile_type = zone_labels.get((r, c), '')
+                if 'entry' in tile_type:
+                    session['entrances'] = [(r, c)]
+                    session['movement_choice'] = [(r, c)]
+                    return redirect(url_for('enter_zone'))
+            else:
+                break
+
+        if remaining_steps > 0:
+            session['chosen_distance'] = remaining_steps
+            session['player_coord'] = (r, c)
+            move_map = {'N': (-1, 0), 'S': (1, 0), 'E': (0, 1), 'W': (0, -1)}
+            new_directions = []
+            for d, (ndr, ndc) in move_map.items():
+                for step in range(1, remaining_steps + 1):
+                    nr, nc = r + ndr * step, c + ndc * step
+                    if (0 <= nr < GRID_ROWS and 0 <= nc < GRID_COLS and (nr, nc) in zone_labels):
+                        new_directions.append(d)
+                        break
+            if new_directions:
+                session['valid_directions'] = new_directions
+                return redirect(url_for('choose_direction'))
+
         session.pop('valid_directions', None)
         session.pop('chosen_distance', None)
-
-        # Zone entrance check
-        tile_type = zone_labels.get(chosen_tile, '')
-        if 'entry' in tile_type:
-            session['entrances'] = [chosen_tile]
-            session['movement_choice'] = [chosen_tile]
-            return redirect(url_for('enter_zone'))
-
+        chosen_tile = (r, c)
         return process_movement(chosen_tile)
 
-    return render_template_string("""
-    <h1>Choose Direction</h1>
-    <form method='POST'>
-        {% for d in options %}
-            <button name='move' value='{{ d }}'>{{ d }}</button><br>
-        {% endfor %}
-    </form>
-    """, options=options)
+    grid = build_grid()
+    return render_template_string(
+        GAME_TEMPLATE + """
+<h1>Choose Direction</h1>
+<form method='POST'>
+%s
+</form>
+""" % "".join(f"<button name='move' value='{d}'>{d}</button><br>" for d in options),
+        grid=grid,
+        player_scores=player_scores,
+        player1=session.get('player1_name', 'Player 1'),
+        player2=session.get('player2_name', 'Player 2'),
+        current_player=current_player,
+        player_stats=player_stats,
+        game_log=game_log
+    )
 
 @app.route('/enter_zone', methods=['GET', 'POST'])
 def enter_zone():
@@ -291,12 +350,29 @@ def enter_zone():
 @app.route('/reset', methods=['POST'])
 def reset():
     global player_positions, player_scores, player_stats, current_player, game_log
-    player_positions = {1: (17, 5), 2: (17, 5)}
+    player_positions = {1: (5, 17), 2: (5, 17)}
     player_scores = {1: 0, 2: 0}
     player_stats = {1: {'loot': 0, 'traps': 0, 'gold_lost': 0}, 2: {'loot': 0, 'traps': 0, 'gold_lost': 0}}
     game_log = []
     current_player = 1
     return redirect(url_for('index'))
+
+def build_grid():
+    grid = [[None for _ in range(GRID_COLS)] for _ in range(GRID_ROWS)]
+    for r in range(GRID_ROWS):
+        for c in range(GRID_COLS):
+            coord = (r, c)
+            if coord not in zone_labels:
+                continue
+            zone = zone_labels.get(coord, '')
+            events = event_map.get(coord, [])
+            players_here = []
+            if player_positions[1] == coord:
+                players_here.append("<span style='color:red'>P1</span>")
+            if player_positions[2] == coord:
+                players_here.append("<span style='color:blue'>P2</span>")
+            grid[r][c] = (coord, events, players_here, zone)
+    return grid
 
 def process_movement(chosen_tile):
     global current_player
